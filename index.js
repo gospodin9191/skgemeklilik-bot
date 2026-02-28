@@ -12,21 +12,17 @@ function getSession(id) {
 }
 
 /* -----------------------------
-   Tarih yardımcıları (1-2 hane destekli)
+   Tarih yardımcıları
 ------------------------------ */
 function pad2(n) {
   return String(n).padStart(2, "0");
 }
 
-// dd.mm.yyyy | d.m.yyyy | dd/mm/yyyy | d/m/yyyy | dd-mm-yyyy -> dd.mm.yyyy
 function normalizeDateTR(s) {
   const t = (s || "").trim();
   const m = t.match(/^(\d{1,2})[./-](\d{1,2})[./-](\d{4})$/);
   if (!m) return null;
-  const dd = pad2(m[1]);
-  const mm = pad2(m[2]);
-  const yy = m[3];
-  return `${dd}.${mm}.${yy}`;
+  return `${pad2(m[1])}.${pad2(m[2])}.${m[3]}`;
 }
 
 function dateToNumberTR(d) {
@@ -39,28 +35,47 @@ function dateToNumberTR(d) {
 function parseEntryRange(text) {
   const raw = (text || "").toString().trim();
 
-  // d.m.yyyy - d.m.yyyy (veya / veya -)
+  // 1) d.m.yyyy - d.m.yyyy
   const mRange = raw.match(
     /(\d{1,2}[./-]\d{1,2}[./-]\d{4})\s*-\s*(\d{1,2}[./-]\d{1,2}[./-]\d{4})/
   );
   if (mRange) {
     const start = normalizeDateTR(mRange[1]);
     const end = normalizeDateTR(mRange[2]);
-    if (start && end) return { type: "range", start, end };
+    if (start && end) return { type: "range", start, end, raw };
   }
 
-  // d.m.yyyy ve öncesi
+  // 2) d.m.yyyy öncesi / sonrası
   const mBefore = raw.match(/(\d{1,2}[./-]\d{1,2}[./-]\d{4}).*(öncesi|ve\s*öncesi)/i);
   if (mBefore) {
     const end = normalizeDateTR(mBefore[1]);
-    if (end) return { type: "before", end };
+    if (end) return { type: "before", end, raw };
   }
 
-  // d.m.yyyy sonrası
   const mAfter = raw.match(/(\d{1,2}[./-]\d{1,2}[./-]\d{4}).*(sonrası|ve\s*sonrası)/i);
   if (mAfter) {
     const start = normalizeDateTR(mAfter[1]);
-    if (start) return { type: "after", start };
+    if (start) return { type: "after", start, raw };
+  }
+
+  // 3) Fallback: sadece yıl aralığı "2000-2008" veya "2008 sonrası" gibi
+  const yRange = raw.match(/(19\d{2}|20\d{2})\s*-\s*(19\d{2}|20\d{2})/);
+  if (yRange) {
+    const start = `01.01.${yRange[1]}`;
+    const end = `31.12.${yRange[2]}`;
+    return { type: "range", start, end, raw };
+  }
+
+  const yBefore = raw.match(/(19\d{2}|20\d{2}).*(öncesi|ve\s*öncesi)/i);
+  if (yBefore) {
+    const end = `31.12.${yBefore[1]}`;
+    return { type: "before", end, raw };
+  }
+
+  const yAfter = raw.match(/(19\d{2}|20\d{2}).*(sonrası|ve\s*sonrası)/i);
+  if (yAfter) {
+    const start = `01.01.${yAfter[1]}`;
+    return { type: "after", start, raw };
   }
 
   return null;
@@ -77,7 +92,7 @@ function rowToArray(rowObj) {
 }
 
 /* -----------------------------
-   Ana emeklilik kural çıkarma (başlıksız, satır içinden)
+   Ana emeklilik kural çıkarma (başlıksız)
 ------------------------------ */
 function extractMainRules(statusRules) {
   const rows = statusRules.map(rowToArray);
@@ -90,7 +105,6 @@ function extractMainRules(statusRules) {
     if (joined.includes("kadın") || joined.includes("kadin")) currentGender = "Kadın";
     if (joined.includes("erkek")) currentGender = "Erkek";
 
-    // satırda tarih aralığı var mı?
     let range = null;
     for (const cell of rr) {
       const r = parseEntryRange(cell);
@@ -101,9 +115,8 @@ function extractMainRules(statusRules) {
     }
     if (!range) continue;
 
-    // satırdaki sayıları yakala
     const nums = rr
-      .map((c) => (c || "").toString().replace(/\./g, "")) // 5.975 -> 5975
+      .map((c) => (c || "").toString().replace(/\./g, ""))
       .map((t) => t.match(/\d+/g) || [])
       .flat()
       .map((n) => Number(n))
@@ -118,7 +131,7 @@ function extractMainRules(statusRules) {
     if (!requiredDays || !requiredAge) continue;
 
     extracted.push({
-      genderTag: currentGender, // null olabilir
+      genderTag: currentGender,
       range,
       requiredDays,
       requiredAge,
@@ -157,45 +170,21 @@ function pickRuleByEntryDate(rulesExtracted, gender, entryDateStr) {
 }
 
 /* -----------------------------
-   Kısmi emeklilik (basit yakalama)
+   Debug: yakalanan tarih ifadeleri
 ------------------------------ */
-function extractPartialRules(statusRules) {
+function debugRanges(statusRules, limit = 15) {
   const rows = statusRules.map(rowToArray);
-
-  let currentGender = null;
-  const extracted = [];
-
+  const found = [];
   for (const rr of rows) {
-    const joined = rr.join(" ").toLowerCase();
-    if (joined.includes("kadın") || joined.includes("kadin")) currentGender = "Kadın";
-    if (joined.includes("erkek")) currentGender = "Erkek";
-
-    if (!joined.includes("kısmi") && !joined.includes("kismi")) continue;
-
-    const nums = rr
-      .map((c) => (c || "").toString().replace(/\./g, ""))
-      .map((t) => t.match(/\d+/g) || [])
-      .flat()
-      .map((n) => Number(n))
-      .filter((n) => Number.isFinite(n));
-
-    const dayCandidates = nums.filter((n) => n >= 3000 && n <= 20000);
-    const ageCandidates = nums.filter((n) => n >= 38 && n <= 80);
-
-    const requiredDays = dayCandidates.length ? Math.max(...dayCandidates) : null;
-    const requiredAge = ageCandidates.length ? Math.min(...ageCandidates) : null;
-
-    if (!requiredDays || !requiredAge) continue;
-
-    extracted.push({ genderTag: currentGender, requiredDays, requiredAge });
+    for (const cell of rr) {
+      const r = parseEntryRange(cell);
+      if (r) {
+        found.push(r.raw || cell);
+        if (found.length >= limit) return found;
+      }
+    }
   }
-
-  return extracted;
-}
-
-function pickAnyPartial(partials, gender) {
-  const same = partials.find((p) => p.genderTag === gender);
-  return same || partials[0] || null;
+  return found;
 }
 
 /* -----------------------------
@@ -207,7 +196,7 @@ function yearFromDate(dateStr) {
   return Number(nd.split(".")[2]);
 }
 
-function buildReport(user, mainRule, partialRule) {
+function buildReport(user, mainRule) {
   const nowYear = 2026;
   const birthY = yearFromDate(user.birthDate);
   const ageNow = birthY ? nowYear - birthY : null;
@@ -223,14 +212,14 @@ function buildReport(user, mainRule, partialRule) {
 
   if (!mainRule) {
     lines.push("❗ Ana emeklilik kuralını tablodan otomatik seçemedim.");
-    lines.push("🗣️ Yorum: Büyük ihtimalle tabloda tarih biçimi tek haneli gün/ay veya farklı aralık yazımıydı; şimdi bunu güçlendirdik. Eğer yine olmazsa, bir sonraki adımda bot ‘yakalanan tarih aralıklarını’ debug olarak listeleyip 1 dakikada kesin bağlarız.");
+    lines.push("🧪 Çözüm: /debug yaz → bot tablodan yakaladığı tarih satırlarını gösterecek. Oradan regex’i 1 hamlede netleştiririz.");
     return lines.join("\n");
   }
 
   const missPrimMain = Math.max(0, mainRule.requiredDays - user.prim);
   const missAgeMain = ageNow != null ? Math.max(0, mainRule.requiredAge - ageNow) : null;
 
-  lines.push("📌 *1) Ana Emeklilik (Tablodaki ana koşul)*");
+  lines.push("📌 *Ana Emeklilik (Tablodaki ana koşul)*");
   lines.push(`• Gerekli prim: ${mainRule.requiredDays}`);
   lines.push(`• Gerekli yaş: ${mainRule.requiredAge}`);
 
@@ -238,47 +227,17 @@ function buildReport(user, mainRule, partialRule) {
     lines.push("⏳ Sonuç: Yaş hesaplanamadı (doğum tarihi formatını kontrol et).");
   } else if (missPrimMain === 0 && missAgeMain === 0) {
     lines.push("✅ Sonuç: *Yaş + prim şartı tamam görünüyor.*");
-    lines.push("🗣️ Yorum: Statü geçişi, hizmet birleştirme, borçlanma gibi ek durumlar yoksa emeklilik hakkın gelmiş/çok yakın.");
   } else {
     lines.push("⏳ Sonuç: *Henüz tamam değil.*");
     if (missPrimMain) lines.push(`• Eksik prim: ${missPrimMain} gün`);
     if (missAgeMain) lines.push(`• Eksik yaş: ${missAgeMain} yıl`);
-    lines.push("🗣️ Yorum: Ana koşula göre eksik var. Kısmi emeklilik bir alternatif olabilir (aşağıda).");
   }
-
-  lines.push("");
-  lines.push("📌 *2) Kısmi Emeklilik (Alternatif)*");
-  if (!partialRule) {
-    lines.push("Bu statüde kısmi emeklilik satırını otomatik yakalayamadım.");
-    lines.push("🗣️ Yorum: Kısmi bölüm farklı başlıkla geçiyor olabilir; anahtar kelimeleri genişletebiliriz.");
-  } else {
-    const missPrimP = Math.max(0, partialRule.requiredDays - user.prim);
-    const missAgeP = ageNow != null ? Math.max(0, partialRule.requiredAge - ageNow) : null;
-
-    lines.push(`• Gerekli prim: ${partialRule.requiredDays}`);
-    lines.push(`• Gerekli yaş: ${partialRule.requiredAge}`);
-
-    if (missAgeP === null) {
-      lines.push("⏳ Sonuç: Yaş hesaplanamadı.");
-    } else if (missPrimP === 0 && missAgeP === 0) {
-      lines.push("✅ Sonuç: *Kısmi için uygun görünüyor.*");
-      lines.push("🗣️ Yorum: Ana emeklilik olmuyorsa, kısmi seçenek bazı kişilerde çıkış yolu oluyor.");
-    } else {
-      lines.push("⏳ Sonuç: *Kısmi için de eksik var.*");
-      if (missPrimP) lines.push(`• Eksik prim: ${missPrimP} gün`);
-      if (missAgeP) lines.push(`• Eksik yaş: ${missAgeP} yıl`);
-      lines.push("🗣️ Yorum: Kısmi emeklilikte ayrıca sigortalılık süresi gibi şartlar olabilir; onu da sonraki adımda net hesaplarız.");
-    }
-  }
-
-  lines.push("");
-  lines.push("⚠️ Not: Bu rapor, yüklediğin tablodan otomatik okuma ile üretilen ön sonuçtur. Statü geçişleri, hizmet birleştirme, borçlanma vb. durumlarda sonuç değişebilir.");
 
   return lines.join("\n");
 }
 
 /* -----------------------------
-   BOT AKIŞI (ONAYSIZ, TARİH ÖRNEKLİ)
+   Bot komutları
 ------------------------------ */
 bot.start((ctx) => {
   const s = getSession(ctx.from.id);
@@ -287,9 +246,30 @@ bot.start((ctx) => {
   ctx.reply("SGK statünüz nedir? (4A / 4B / 4C)");
 });
 
+bot.command("debug", (ctx) => {
+  const s = getSession(ctx.from.id);
+  const status = (s.data.status || "4A").toUpperCase();
+  const statusRules = rules[status] || [];
+  const found = debugRanges(statusRules, 15);
+
+  if (!found.length) {
+    return ctx.reply(
+      `DEBUG (${status}): Hiç tarih ifadesi yakalayamadım.\n` +
+      `Büyük ihtimalle tabloda tarih yerine farklı bir yazım var (örn: 08/09/1999 yerine 8 Eylül 1999 gibi).\n` +
+      `Bana tabloda “işe başlangıç” satırlarından bir örnek metni yazarsan regex’i ona göre güncellerim.`
+    );
+  }
+
+  return ctx.reply(
+    `DEBUG (${status}): İlk ${found.length} tarih ifadesi:\n- ` + found.join("\n- ")
+  );
+});
+
 bot.on("text", (ctx) => {
   const s = getSession(ctx.from.id);
   const msg = ctx.message.text.trim();
+
+  if (msg === "/debug") return; // komut zaten yakalandı
 
   if (s.step === 0) return ctx.reply("Başlamak için /start yaz 🙂");
 
@@ -335,9 +315,6 @@ bot.on("text", (ctx) => {
     const mainExtracted = extractMainRules(statusRules);
     const mainPicked = pickRuleByEntryDate(mainExtracted, s.data.gender, s.data.entryDate);
 
-    const partialExtracted = extractPartialRules(statusRules);
-    const partialPicked = pickAnyPartial(partialExtracted, s.data.gender);
-
     const report = buildReport(
       {
         status: s.data.status,
@@ -346,8 +323,7 @@ bot.on("text", (ctx) => {
         entryDate: s.data.entryDate,
         prim: s.data.prim,
       },
-      mainPicked,
-      partialPicked
+      mainPicked
     );
 
     s.step = 0;
@@ -360,9 +336,7 @@ bot.launch();
 console.log("Bot çalışıyor...");
 
 const PORT = process.env.PORT || 3000;
-http
-  .createServer((req, res) => {
-    res.writeHead(200);
-    res.end("OK");
-  })
-  .listen(PORT, () => console.log("HTTP server port", PORT));
+http.createServer((req, res) => {
+  res.writeHead(200);
+  res.end("OK");
+}).listen(PORT, () => console.log("HTTP server port", PORT));
