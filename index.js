@@ -77,12 +77,19 @@ function parseEntryRange(text) {
    JSON satırlarını diziye çevirme
 ------------------------------ */
 function rowToArray(rowObj) {
-  const keys = Object.keys(rowObj)
+  // 1) Eğer "0","1","2" gibi sayısal kolonlar varsa onları sırayla al
+  const numKeys = Object.keys(rowObj)
     .filter((k) => /^\d+$/.test(k))
     .sort((a, b) => Number(a) - Number(b));
-  return keys.map((k) => (rowObj[k] ?? "").toString().trim());
-}
 
+  if (numKeys.length) {
+    return numKeys.map((k) => (rowObj[k] ?? "").toString().trim());
+  }
+
+  // 2) Yoksa: başlıklı kolonlar var demektir -> tüm değerleri sırayla al
+  // (csv-parser başlık kullanmış olabilir)
+  return Object.values(rowObj).map((v) => (v ?? "").toString().trim());
+}
 /* -----------------------------
    Ana kural çıkarma (başlıksız)
 ------------------------------ */
