@@ -65,8 +65,11 @@ function parseEntryRange(text) {
 
 /* --------- Helpers: row reading --------- */
 function rowToArray(rowObj) {
+  // 1) numeric keys "0","1","2"...
   const numKeys = Object.keys(rowObj).filter(k => /^\d+$/.test(k)).sort((a,b)=>Number(a)-Number(b));
   if (numKeys.length) return numKeys.map(k => (rowObj[k] ?? "").toString().trim());
+
+  // 2) otherwise values (header-based)
   return Object.values(rowObj).map(v => (v ?? "").toString().trim());
 }
 
@@ -102,7 +105,6 @@ function extractMainRules(statusRules) {
     const requiredAge = ageCandidates.length ? Math.min(...ageCandidates) : null;
 
     if (!requiredDays || !requiredAge) continue;
-
     extracted.push({ genderTag: currentGender, range, requiredDays, requiredAge });
   }
 
@@ -137,22 +139,6 @@ function pickRuleByEntryDate(rulesExtracted, gender, entryDateStr) {
   return null;
 }
 
-function debugRanges(statusRules, limit = 20) {
-  const rows = statusRules.map(rowToArray);
-  const found = [];
-  for (const rr of rows) {
-    for (const cell of rr) {
-      const r = parseEntryRange(cell);
-      if (r) {
-        found.push(r.raw || cell);
-        if (found.length >= limit) return found;
-      }
-    }
-  }
-  return found;
-}
-
-/* --------- Report --------- */
 function yearFromDate(dateStr) {
   const nd = normalizeDateTR(dateStr);
   if (!nd) return null;
@@ -175,7 +161,9 @@ function buildReport(user, mainRule) {
 
   if (!mainRule) {
     lines.push("❗ Ana emeklilik kuralını tablodan otomatik seçemedim.");
-    lines.push("🧪 /debug yaz → bot tablodan yakaladığı tarih örneklerini gösterecek.");
+    lines.push("🧪 Şimdi /dump ve /scan kullanacağız:");
+    lines.push("• /dump = JSON satır yapısını gösterir");
+    lines.push("• /scan = tarih benzeri bir şey var mı tarar");
     return lines.join("\n");
   }
 
@@ -200,7 +188,7 @@ function buildReport(user, mainRule) {
 }
 
 /* -----------------------------
-   START
+   BOT START
 ------------------------------ */
 bot.start((ctx) => {
   const s = getSession(ctx.from.id);
@@ -211,26 +199,84 @@ bot.start((ctx) => {
 
 /* -----------------------------
    TEK GİRİŞ NOKTASI: text
-   /debug burada EN BAŞTA yakalanır (hangi step olursa olsun)
+   /dump ve /scan her adımda çalışır
 ------------------------------ */
 bot.on("text", (ctx) => {
   const s = getSession(ctx.from.id);
   const msg = ctx.message.text.trim();
 
-  // ✅ DEBUG her zaman çalışır
-  if (msg.toLowerCase() === "/debug" || msg.toLowerCase() === "debug") {
+  const lower = msg.toLowerCase();
+
+  // ✅ /dump: ilk 2 satırı + key listesi bas
+  if (lower === "/dump" || lower === "dump") {
     const status = (s.data.status || "4A").toUpperCase();
     const statusRules = rules[status] || [];
-    const found = debugRanges(statusRules, 20);
-    if (!found.length) {
+    if (!statusRules.length) return ctx.reply(`DUMP (${status}): Boş görünüyor.`);
+
+    const r0 = statusRules[0];
+    const r1 = statusRules[1] || null;
+
+    const keys0 = Object.keys(r0);
+    const sample0 = {};
+    keys0.slice(0, 20).forEach(k => sample0[k] = r0[k]); // ilk 20 key yeter
+
+    const lines = [];
+    lines.push(`DUMP (${status})`);
+    lines.push(`Toplam satır: ${statusRules.length}`);
+    lines.push(`Satır0 key sayısı: ${keys0.length}`);
+    lines.push(`Satır0 ilk keyler: ${keys0.slice(0, 25).join(", ")}`);
+    lines.push("");
+    lines.push("Satır0 örnek (ilk 20 alan):");
+    lines.push(JSON.stringify(sample0, null, 2));
+
+    if (r1) {
+      const keys1 = Object.keys(r1);
+      const sample1 = {};
+      keys1.slice(0, 20).forEach(k => sample1[k] = r1[k]);
+      lines.push("");
+      lines.push(`Satır1 key sayısı: ${keys1.length}`);
+      lines.push("Satır1 örnek (ilk 20 alan):");
+      lines.push(JSON.stringify(sample1, null, 2));
+    }
+
+    // Telegram mesaj limiti için kırp
+    const out = lines.join("\n");
+    return ctx.reply(out.length > 3500 ? out.slice(0, 3500) + "\n... (kırpıldı)" : out);
+  }
+
+  // ✅ /scan: ilk 500 satırda tarih benzeri bir şey ara (çok geniş regex)
+  if (lower === "/scan" || lower === "scan") {
+    const status = (s.data.status || "4A").toUpperCase();
+    const statusRules = rules[status] || [];
+    if (!statusRules.length) return ctx.reply(`SCAN (${status}): Boş.`);
+
+    const maxRows = Math.min(500, statusRules.length);
+    const hits = [];
+
+    const dateLike = /(\d{1,2}[./-]\d{1,2}[./-]\d{2,4})|((19\d{2}|20\d{2})\s*-\s*(19\d{2}|20\d{2}))|(19\d{2}|20\d{2})/g;
+
+    for (let i = 0; i < maxRows; i++) {
+      const rr = rowToArray(statusRules[i]).join(" | ");
+      const m = rr.match(dateLike);
+      if (m && m.length) {
+        hits.push(`Satır ${i}: ${m.slice(0, 6).join(", ")}  >>>  ${rr.slice(0, 120)}`);
+        if (hits.length >= 15) break;
+      }
+    }
+
+    if (!hits.length) {
       return ctx.reply(
-        `DEBUG (${status}): Hiç tarih ifadesi yakalayamadım.\n` +
-        `Bu, verinin "satır hücresi" şeklinde gelmediği anlamına gelebilir.\n` +
-        `Bir sonraki adımda JSON'dan örnek satırı Telegram'a bastırıp yapıyı göstereceğim.`
+        `SCAN (${status}): İlk ${maxRows} satırda date-like bir şey bulamadım.\n` +
+        `Bu durumda tabloda tarih hiç yok (sadece yıl/süre gibi) veya CSV->JSON dönüşümünde metinler kayboldu.\n` +
+        `Şimdi /dump çıktısı bize formatı gösterecek.`
       );
     }
-    return ctx.reply(`DEBUG (${status}): İlk ${found.length} örnek:\n- ` + found.join("\n- "));
+
+    return ctx.reply(`SCAN (${status}): Bulunan örnekler:\n- ` + hits.join("\n- "));
   }
+
+  // komutlar burada akışı bozmasın
+  if (msg.startsWith("/")) return;
 
   if (s.step === 0) return ctx.reply("Başlamak için /start yaz 🙂");
 
@@ -239,7 +285,7 @@ bot.on("text", (ctx) => {
     if (!["4A", "4B", "4C"].includes(v)) return ctx.reply("Lütfen 4A / 4B / 4C yaz.");
     s.data.status = v;
     s.step = 2;
-    return ctx.reply("Cinsiyetiniz nedir? (Erkek / Kadın)  (kısaca: e / k)");
+    return ctx.reply("Cinsiyetiniz nedir? (Erkek / Kadın) (kısaca: e / k)");
   }
 
   if (s.step === 2) {
