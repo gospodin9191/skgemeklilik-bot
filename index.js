@@ -6,24 +6,26 @@ const bot = new Telegraf(process.env.BOT_TOKEN);
 const rules = JSON.parse(fs.readFileSync("sgk_rules.json", "utf8"));
 
 const sessions = new Map();
-
 function getSession(id) {
-  if (!sessions.has(id)) {
-    sessions.set(id, { step: 0, data: {} });
-  }
+  if (!sessions.has(id)) sessions.set(id, { step: 0, data: {} });
   return sessions.get(id);
 }
 
 /* -----------------------------
-   Tarih yardımcıları
+   Tarih yardımcıları (1-2 hane destekli)
 ------------------------------ */
+function pad2(n) {
+  return String(n).padStart(2, "0");
+}
 
+// dd.mm.yyyy | d.m.yyyy | dd/mm/yyyy | d/m/yyyy | dd-mm-yyyy -> dd.mm.yyyy
 function normalizeDateTR(s) {
-  // dd.mm.yyyy veya dd/mm/yyyy -> dd.mm.yyyy
   const t = (s || "").trim();
-  const m = t.match(/^(\d{2})[./](\d{2})[./](\d{4})$/);
+  const m = t.match(/^(\d{1,2})[./-](\d{1,2})[./-](\d{4})$/);
   if (!m) return null;
-  const dd = m[1], mm = m[2], yy = m[3];
+  const dd = pad2(m[1]);
+  const mm = pad2(m[2]);
+  const yy = m[3];
   return `${dd}.${mm}.${yy}`;
 }
 
@@ -35,26 +37,29 @@ function dateToNumberTR(d) {
 }
 
 function parseEntryRange(text) {
-  // "dd.mm.yyyy - dd.mm.yyyy", "dd/mm/yyyy - dd/mm/yyyy"
-  // "dd.mm.yyyy ve öncesi", "dd.mm.yyyy sonrası" (nokta veya slash)
   const raw = (text || "").toString().trim();
 
-  const range = raw.match(/(\d{2}[./]\d{2}[./]\d{4})\s*-\s*(\d{2}[./]\d{2}[./]\d{4})/);
-  if (range) {
-    const start = normalizeDateTR(range[1]);
-    const end = normalizeDateTR(range[2]);
+  // d.m.yyyy - d.m.yyyy (veya / veya -)
+  const mRange = raw.match(
+    /(\d{1,2}[./-]\d{1,2}[./-]\d{4})\s*-\s*(\d{1,2}[./-]\d{1,2}[./-]\d{4})/
+  );
+  if (mRange) {
+    const start = normalizeDateTR(mRange[1]);
+    const end = normalizeDateTR(mRange[2]);
     if (start && end) return { type: "range", start, end };
   }
 
-  const before = raw.match(/(\d{2}[./]\d{2}[./]\d{4}).*(öncesi|ve\s*öncesi)/i);
-  if (before) {
-    const end = normalizeDateTR(before[1]);
+  // d.m.yyyy ve öncesi
+  const mBefore = raw.match(/(\d{1,2}[./-]\d{1,2}[./-]\d{4}).*(öncesi|ve\s*öncesi)/i);
+  if (mBefore) {
+    const end = normalizeDateTR(mBefore[1]);
     if (end) return { type: "before", end };
   }
 
-  const after = raw.match(/(\d{2}[./]\d{2}[./]\d{4}).*(sonrası|ve\s*sonrası)/i);
-  if (after) {
-    const start = normalizeDateTR(after[1]);
+  // d.m.yyyy sonrası
+  const mAfter = raw.match(/(\d{1,2}[./-]\d{1,2}[./-]\d{4}).*(sonrası|ve\s*sonrası)/i);
+  if (mAfter) {
+    const start = normalizeDateTR(mAfter[1]);
     if (start) return { type: "after", start };
   }
 
@@ -64,9 +69,7 @@ function parseEntryRange(text) {
 /* -----------------------------
    JSON satırlarını diziye çevirme
 ------------------------------ */
-
 function rowToArray(rowObj) {
-  // csv-parser sonucu kolonlar "0","1","2"... olabilir
   const keys = Object.keys(rowObj)
     .filter((k) => /^\d+$/.test(k))
     .sort((a, b) => Number(a) - Number(b));
@@ -74,9 +77,8 @@ function rowToArray(rowObj) {
 }
 
 /* -----------------------------
-   Ana emeklilik kural çıkarma (başlıksız heuristik)
+   Ana emeklilik kural çıkarma (başlıksız, satır içinden)
 ------------------------------ */
-
 function extractMainRules(statusRules) {
   const rows = statusRules.map(rowToArray);
 
@@ -101,17 +103,15 @@ function extractMainRules(statusRules) {
 
     // satırdaki sayıları yakala
     const nums = rr
-      .map((c) => (c || "").toString().replace(/\./g, "")) // 5.975 gibi yazımlar için
+      .map((c) => (c || "").toString().replace(/\./g, "")) // 5.975 -> 5975
       .map((t) => t.match(/\d+/g) || [])
       .flat()
       .map((n) => Number(n))
       .filter((n) => Number.isFinite(n));
 
-    // gün tipik: 3000-20000 arası, yaş tipik: 38-80 arası
     const dayCandidates = nums.filter((n) => n >= 3000 && n <= 20000);
     const ageCandidates = nums.filter((n) => n >= 38 && n <= 80);
 
-    // en mantıklı seçim
     const requiredDays = dayCandidates.length ? Math.max(...dayCandidates) : null;
     const requiredAge = ageCandidates.length ? Math.min(...ageCandidates) : null;
 
@@ -132,7 +132,6 @@ function pickRuleByEntryDate(rulesExtracted, gender, entryDateStr) {
   const entryNum = dateToNumberTR(entryDateStr);
   if (!entryNum) return null;
 
-  // Önce cinsiyet eşleşenleri dene
   const ordered = [
     ...rulesExtracted.filter((r) => r.genderTag === gender),
     ...rulesExtracted.filter((r) => !r.genderTag),
@@ -159,9 +158,7 @@ function pickRuleByEntryDate(rulesExtracted, gender, entryDateStr) {
 
 /* -----------------------------
    Kısmi emeklilik (basit yakalama)
-   Not: tablolar farklı olabiliyor; burada "kısmi" geçen satırdan yaş+gün çekiyoruz.
 ------------------------------ */
-
 function extractPartialRules(statusRules) {
   const rows = statusRules.map(rowToArray);
 
@@ -190,11 +187,7 @@ function extractPartialRules(statusRules) {
 
     if (!requiredDays || !requiredAge) continue;
 
-    extracted.push({
-      genderTag: currentGender,
-      requiredDays,
-      requiredAge,
-    });
+    extracted.push({ genderTag: currentGender, requiredDays, requiredAge });
   }
 
   return extracted;
@@ -202,14 +195,12 @@ function extractPartialRules(statusRules) {
 
 function pickAnyPartial(partials, gender) {
   const same = partials.find((p) => p.genderTag === gender);
-  if (same) return same;
-  return partials[0] || null;
+  return same || partials[0] || null;
 }
 
 /* -----------------------------
    Rapor
 ------------------------------ */
-
 function yearFromDate(dateStr) {
   const nd = normalizeDateTR(dateStr);
   if (!nd) return null;
@@ -217,7 +208,7 @@ function yearFromDate(dateStr) {
 }
 
 function buildReport(user, mainRule, partialRule) {
-  const nowYear = 2026; // istersen sonra güncel yıl/tarih yapılır
+  const nowYear = 2026;
   const birthY = yearFromDate(user.birthDate);
   const ageNow = birthY ? nowYear - birthY : null;
 
@@ -230,10 +221,9 @@ function buildReport(user, mainRule, partialRule) {
   lines.push(`• Prim: ${user.prim}`);
   lines.push("");
 
-  // ANA
   if (!mainRule) {
     lines.push("❗ Ana emeklilik kuralını tablodan otomatik seçemedim.");
-    lines.push("🗣️ Yorum: Tablo yapısı başlıklardan çok farklı olabilir. Bir sonraki adımda botun senden “tabloda ana emeklilik hangi satırdan başlıyor” bilgisini almasını ekleyip %100 netleştiririz.");
+    lines.push("🗣️ Yorum: Büyük ihtimalle tabloda tarih biçimi tek haneli gün/ay veya farklı aralık yazımıydı; şimdi bunu güçlendirdik. Eğer yine olmazsa, bir sonraki adımda bot ‘yakalanan tarih aralıklarını’ debug olarak listeleyip 1 dakikada kesin bağlarız.");
     return lines.join("\n");
   }
 
@@ -256,12 +246,11 @@ function buildReport(user, mainRule, partialRule) {
     lines.push("🗣️ Yorum: Ana koşula göre eksik var. Kısmi emeklilik bir alternatif olabilir (aşağıda).");
   }
 
-  // KISMI
   lines.push("");
   lines.push("📌 *2) Kısmi Emeklilik (Alternatif)*");
   if (!partialRule) {
     lines.push("Bu statüde kısmi emeklilik satırını otomatik yakalayamadım.");
-    lines.push("🗣️ Yorum: Tabloda kısmi bölüm farklı bir başlıkla geçiyor olabilir. İstersen sonraki adımda kısmi bölüm anahtar kelimelerini genişletelim.");
+    lines.push("🗣️ Yorum: Kısmi bölüm farklı başlıkla geçiyor olabilir; anahtar kelimeleri genişletebiliriz.");
   } else {
     const missPrimP = Math.max(0, partialRule.requiredDays - user.prim);
     const missAgeP = ageNow != null ? Math.max(0, partialRule.requiredAge - ageNow) : null;
@@ -278,20 +267,19 @@ function buildReport(user, mainRule, partialRule) {
       lines.push("⏳ Sonuç: *Kısmi için de eksik var.*");
       if (missPrimP) lines.push(`• Eksik prim: ${missPrimP} gün`);
       if (missAgeP) lines.push(`• Eksik yaş: ${missAgeP} yıl`);
-      lines.push("🗣️ Yorum: Kısmi emeklilikte ayrıca sigortalılık süresi gibi şartlar olabilir; sonraki adımda bunu da net hesaplayacağız.");
+      lines.push("🗣️ Yorum: Kısmi emeklilikte ayrıca sigortalılık süresi gibi şartlar olabilir; onu da sonraki adımda net hesaplarız.");
     }
   }
 
   lines.push("");
-  lines.push("⚠️ Not: Bu rapor, yüklediğin tablodan otomatik okuma ile üretilen ön sonuçtur. Statü geçişleri, hizmet birleştirme, borçlanma, fiili hizmet zammı vb. durumlarda sonuç değişebilir.");
+  lines.push("⚠️ Not: Bu rapor, yüklediğin tablodan otomatik okuma ile üretilen ön sonuçtur. Statü geçişleri, hizmet birleştirme, borçlanma vb. durumlarda sonuç değişebilir.");
 
   return lines.join("\n");
 }
 
 /* -----------------------------
-   BOT AKIŞI (ONAYSIZ)
+   BOT AKIŞI (ONAYSIZ, TARİH ÖRNEKLİ)
 ------------------------------ */
-
 bot.start((ctx) => {
   const s = getSession(ctx.from.id);
   s.step = 1;
