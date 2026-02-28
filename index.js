@@ -3,8 +3,6 @@ const fs = require("fs");
 const http = require("http");
 
 const bot = new Telegraf(process.env.BOT_TOKEN);
-
-// sgk_rules.json aynı klasörde olmalı
 const rules = JSON.parse(fs.readFileSync("sgk_rules.json", "utf8"));
 
 const sessions = new Map();
@@ -14,7 +12,7 @@ function getSession(id) {
     sessions.set(id, {
       step: 0,
       data: {},
-      pending: null, // { key, value, nextStep, label }
+      pending: null,
       awaitingConfirm: false,
     });
   }
@@ -40,7 +38,6 @@ function askConfirm(ctx, label, key, value, nextStep) {
 ------------------------------ */
 
 function rowToArray(rowObj) {
-  // csv-parser ile oluşmuş objelerde kolonlar "0","1","2"... olur
   const keys = Object.keys(rowObj)
     .filter((k) => /^\d+$/.test(k))
     .sort((a, b) => Number(a) - Number(b));
@@ -57,7 +54,6 @@ function findNearestGenderTag(rowsArr, startIdx) {
 }
 
 function parseEntryRange(text) {
-  // "02.06.1984-01.06.1985" veya "01.06.1984 ve öncesi" / "sonrası"
   const t = (text || "").toString().trim();
 
   const mRange = t.match(/(\d{2}\.\d{2}\.\d{4})\s*-\s*(\d{2}\.\d{2}\.\d{4})/);
@@ -73,7 +69,6 @@ function parseEntryRange(text) {
 }
 
 function dateToNumberTR(d) {
-  // "dd.mm.yyyy" -> yyyymmdd
   const m = (d || "").match(/^(\d{2})\.(\d{2})\.(\d{4})$/);
   if (!m) return null;
   const [, dd, mm, yy] = m;
@@ -81,7 +76,6 @@ function dateToNumberTR(d) {
 }
 
 function entryYearToApproxDateNumber(year) {
-  // sadece yıl aldığımız için yaklaşık: 01.07.YYYY
   return Number(`${year}0701`);
 }
 
@@ -93,7 +87,6 @@ function extractMainRetirementTable(statusRules) {
     const idxEntry = row.findIndex((c) => c.toLowerCase().includes("işe başlangıç"));
     if (idxEntry === -1) continue;
 
-    // Gün/Yaş kolonlarını aynı satırda ya da bir sonraki satırda ara
     const row1 = row;
     const row2 = rowsArr[i + 1] || row;
 
@@ -118,7 +111,7 @@ function extractMainRetirementTable(statusRules) {
       const range = parseEntryRange(entryText);
 
       const nonEmpty = rr.filter((x) => x && x !== "NaN").length;
-      if (!entryText && nonEmpty < 3) break; // tablo bitti
+      if (!entryText && nonEmpty < 3) break;
 
       if (!range) continue;
 
@@ -127,13 +120,7 @@ function extractMainRetirementTable(statusRules) {
 
       if (!Number.isFinite(days) || !Number.isFinite(age) || days === 0 || age === 0) continue;
 
-      extracted.push({
-        genderTag,
-        range,
-        requiredDays: days,
-        requiredAge: age,
-        raw: rr,
-      });
+      extracted.push({ genderTag, range, requiredDays: days, requiredAge: age, raw: rr });
     }
 
     if (extracted.length) return extracted;
@@ -144,7 +131,6 @@ function extractMainRetirementTable(statusRules) {
 
 function pickRuleByEntryYear(rulesExtracted, gender, entryYear) {
   const entryNum = entryYearToApproxDateNumber(entryYear);
-
   const candidates = rulesExtracted.filter((r) => !r.genderTag || r.genderTag === gender);
 
   for (const r of candidates) {
@@ -165,42 +151,203 @@ function pickRuleByEntryYear(rulesExtracted, gender, entryYear) {
   return null;
 }
 
-function buildReport(user, rule) {
-  const nowYear = 2026; // yıl bazlı (istersen sonra gün/ay hassas yaparız)
+/* -----------------------------
+   KISMI EMEKLİLİK (ALTERNATİF)
+   - “kısmi” geçen bölümde Sigortalılık Süresi/Yıl + Yaş + Gün arar
+------------------------------ */
+
+function parseYearsText(cell) {
+  // "14 yıldan fazla – 15 yıl ve daha az" => min=15 (yaklaşık), max=15
+  const t = (cell || "").toLowerCase();
+
+  // "15 yıl ve daha az"
+  const mMax = t.match(/(\d+)\s*yıl\s*ve\s*daha\s*az/);
+  if (mMax) return { minYears: null, maxYears: Number(mMax[1]) };
+
+  // "15 yıl ve daha fazla"
+  const mMin = t.match(/(\d+)\s*yıl\s*ve\s*daha\s*fazla/);
+  if (mMin) return { minYears: Number(mMin[1]), maxYears: null };
+
+  // "14 yıldan fazla – 21 yıl 6 ay ve daha az" gibi (ayı şimdilik yok sayıyoruz)
+  const mRange = t.match(/(\d+)\s*yıl.*-\s*(\d+)\s*yıl/);
+  if (mRange) return { minYears: Number(mRange[1]) + 1, maxYears: Number(mRange[2]) };
+
+  // tek sayı yakala
+  const mAny = t.match(/(\d+)\s*yıl/);
+  if (mAny) return { minYears: Number(mAny[1]), maxYears: Number(mAny[1]) };
+
+  return null;
+}
+
+function extractPartialRetirementTable(statusRules) {
+  const rowsArr = statusRules.map(rowToArray);
+
+  // "kısmi" geçen yerden itibaren tablo arayacağız
+  for (let i = 0; i < rowsArr.length; i++) {
+    const joined = rowsArr[i].join(" ").toLowerCase();
+    if (!joined.includes("kısmi") && !joined.includes("kismi")) continue;
+
+    // yakındaki başlıklarda "sigortal" veya "süre" veya "yıl" + "yaş" + "gün" ara
+    let headerIdx = i;
+    for (let k = i; k < Math.min(i + 8, rowsArr.length); k++) {
+      const row = rowsArr[k].join(" ").toLowerCase();
+      const hasYears = row.includes("sigortal") || row.includes("süre") || row.includes("yıl") || row.includes("yil");
+      const hasAge = row.includes("yaş") || row.includes("yas");
+      const hasDays = row.includes("gün") || row.includes("gun");
+      if (hasYears && hasAge && hasDays) {
+        headerIdx = k;
+        break;
+      }
+    }
+
+    const headerRow = rowsArr[headerIdx];
+    const idxYears = headerRow.findIndex((c) => {
+      const t = c.toLowerCase();
+      return t.includes("sigortal") || t.includes("süre") || t.includes("yıl") || t.includes("yil");
+    });
+    const idxAge = headerRow.findIndex((c) => c.toLowerCase().includes("yaş") || c.toLowerCase().includes("yas"));
+    const idxDays = headerRow.findIndex((c) => c.toLowerCase().includes("gün") || c.toLowerCase().includes("gun"));
+
+    if (idxYears === -1 || idxAge === -1 || idxDays === -1) continue;
+
+    const genderTag = findNearestGenderTag(rowsArr, headerIdx);
+
+    const extracted = [];
+    for (let r = headerIdx + 1; r < rowsArr.length; r++) {
+      const rr = rowsArr[r];
+      const yearsCell = rr[idxYears] || "";
+      const nonEmpty = rr.filter((x) => x && x !== "NaN").length;
+      if (!yearsCell && nonEmpty < 3) break;
+
+      const yearsRange = parseYearsText(yearsCell);
+      if (!yearsRange) continue;
+
+      const age = Number((rr[idxAge] || "").toString().replace(/[^\d]/g, ""));
+      const days = Number((rr[idxDays] || "").toString().replace(/[^\d]/g, ""));
+      if (!Number.isFinite(age) || !Number.isFinite(days) || age === 0 || days === 0) continue;
+
+      extracted.push({
+        genderTag,
+        yearsRange,
+        requiredAge: age,
+        requiredDays: days,
+        raw: rr,
+      });
+    }
+
+    if (extracted.length) return extracted;
+  }
+
+  return [];
+}
+
+function pickPartialRule(partials, gender, insuranceYearsApprox) {
+  const candidates = partials.filter((p) => !p.genderTag || p.genderTag === gender);
+
+  // insuranceYearsApprox aralığa uyuyorsa onu seç; yoksa en yakın alt sınırı seç
+  for (const p of candidates) {
+    const minY = p.yearsRange.minYears;
+    const maxY = p.yearsRange.maxYears;
+
+    const okMin = minY == null ? true : insuranceYearsApprox >= minY;
+    const okMax = maxY == null ? true : insuranceYearsApprox <= maxY;
+
+    if (okMin && okMax) return p;
+  }
+
+  // fallback: en yüksek minYears <= insuranceYearsApprox
+  let best = null;
+  for (const p of candidates) {
+    const minY = p.yearsRange.minYears ?? -Infinity;
+    if (minY <= insuranceYearsApprox) {
+      if (!best || (best.yearsRange.minYears ?? -Infinity) < minY) best = p;
+    }
+  }
+  return best;
+}
+
+/* -----------------------------
+   RAPOR
+------------------------------ */
+
+function buildFullReport(user, mainRule, partialRule) {
+  const nowYear = 2026; // istersen sonra gerçek tarihe çeviririz
   const ageNow = nowYear - user.birthYear;
-
-  const missingPrim = Math.max(0, rule.requiredDays - user.prim);
-  const missingAge = Math.max(0, rule.requiredAge - ageNow);
-
-  const okPrim = missingPrim === 0;
-  const okAge = missingAge === 0;
-  const elig = okPrim && okAge;
+  const insuranceYearsApprox = Math.max(0, nowYear - user.entryYear);
 
   const lines = [];
-  lines.push("🧾 *SGK Emeklilik Ön Raporu*");
+  lines.push("🧾 *SGK Emeklilik Raporu*");
   lines.push(`• Statü: ${user.status}`);
   lines.push(`• Cinsiyet: ${user.gender}`);
   lines.push(`• Doğum yılı: ${user.birthYear} (≈ ${ageNow} yaş)`);
-  lines.push(`• İlk giriş yılı: ${user.entryYear}`);
+  lines.push(`• İlk giriş yılı: ${user.entryYear} (≈ ${insuranceYearsApprox} yıl sigortalılık)`);
   lines.push(`• Prim: ${user.prim}`);
   lines.push("");
-  lines.push("📌 *Tablodan Bulunan Kural (Ana Yaşlılık)*");
-  lines.push(`• Gerekli yaş: ${rule.requiredAge}`);
-  lines.push(`• Gerekli prim: ${rule.requiredDays}`);
+
+  // ANA
+  const missPrimMain = Math.max(0, mainRule.requiredDays - user.prim);
+  const missAgeMain = Math.max(0, mainRule.requiredAge - ageNow);
+  const okMain = missPrimMain === 0 && missAgeMain === 0;
+
+  lines.push("📌 *1) Ana Emeklilik (Tablodaki ana koşul)*");
+  lines.push(`• Gerekli yaş: ${mainRule.requiredAge}`);
+  lines.push(`• Gerekli prim: ${mainRule.requiredDays}`);
+  if (okMain) {
+    lines.push("✅ Sonuç: *Uygun görünüyorsun* (yaş + prim tamam).");
+    lines.push("🗣️ Yorum: Statü geçişi, hizmet birleştirme, borçlanma gibi detaylar yoksa emeklilik hakkın gelmiş/çok yakın.");
+  } else {
+    lines.push("⏳ Sonuç: *Henüz tamam değil.*");
+    if (missPrimMain) lines.push(`• Eksik prim: ${missPrimMain} gün`);
+    if (missAgeMain) lines.push(`• Eksik yaş: ${missAgeMain} yıl`);
+    lines.push("🗣️ Yorum: Ana koşula göre eksiklerin var. Ama kısmi emeklilik bir alternatif olabilir (aşağıda).");
+  }
   lines.push("");
 
-  if (elig) {
-    lines.push("✅ *Sonuç:* Yaş + prim şartını karşılıyorsun (ana tabloya göre).");
-    lines.push("🗣️ Yorum: Hizmet birleştirme/statü geçişi/borçlanma gibi istisnalar yoksa emeklilik hakkın gelmiş ya da çok yakın görünüyor.");
+  // KISMI
+  if (partialRule) {
+    const missPrimP = Math.max(0, partialRule.requiredDays - user.prim);
+    const missAgeP = Math.max(0, partialRule.requiredAge - ageNow);
+
+    const minY = partialRule.yearsRange.minYears;
+    const maxY = partialRule.yearsRange.maxYears;
+
+    const okMinY = minY == null ? true : insuranceYearsApprox >= minY;
+    const okMaxY = maxY == null ? true : insuranceYearsApprox <= maxY;
+    const okYears = okMinY && okMaxY;
+
+    const okPartial = okYears && missPrimP === 0 && missAgeP === 0;
+
+    lines.push("📌 *2) Kısmi Emeklilik (Alternatif)*");
+    lines.push(
+      `• Sigortalılık süresi şartı: ${
+        minY != null && maxY != null ? `${minY}–${maxY} yıl` : minY != null ? `${minY}+ yıl` : maxY != null ? `≤ ${maxY} yıl` : "—"
+      }`
+    );
+    lines.push(`• Gerekli yaş: ${partialRule.requiredAge}`);
+    lines.push(`• Gerekli prim: ${partialRule.requiredDays}`);
+
+    if (okPartial) {
+      lines.push("✅ Sonuç: *Kısmi emeklilik için uygun görünüyorsun.*");
+      lines.push("🗣️ Yorum: Ana emeklilik olmuyorsa bile, kısmi emeklilik bazı durumlarda çıkış yolu olabilir.");
+    } else {
+      lines.push("⏳ Sonuç: *Kısmi emeklilikte de eksik var.*");
+      if (!okYears) {
+        lines.push("• Sigortalılık süresi: aralığa tam uymuyor (yaklaşık yıl hesabı yaptım).");
+      }
+      if (missPrimP) lines.push(`• Eksik prim: ${missPrimP} gün`);
+      if (missAgeP) lines.push(`• Eksik yaş: ${missAgeP} yıl`);
+      lines.push("🗣️ Yorum: İstersen bir sonraki adımda daha net olması için “ilk giriş tarihi (gün/ay/yıl)” da alıp yıl hesabını kesinleştiririz.");
+    }
+
+    lines.push("");
   } else {
-    lines.push("⏳ *Sonuç:* Henüz tamam değil (ana tabloya göre).");
-    if (!okPrim) lines.push(`• Eksik prim: ${missingPrim} gün`);
-    if (!okAge) lines.push(`• Eksik yaş: ${missingAge} yıl`);
-    lines.push("🗣️ Yorum: Şu an ana emeklilik koşulunu baz aldım. Bir sonraki adımda tabloda varsa *kısmi emeklilik* seçeneklerini de ikinci alternatif olarak göstereceğim.");
+    lines.push("📌 *2) Kısmi Emeklilik (Alternatif)*");
+    lines.push("Bu statü sayfasında kısmi emeklilik tablosunu otomatik yakalayamadım.");
+    lines.push("🗣️ Yorum: İstersen bir sonraki adımda tabloda kısmi bölümün başladığı satırı birlikte işaretleyip %100 doğru bağlarız.");
+    lines.push("");
   }
 
-  lines.push("");
-  lines.push("⚠️ Not: Bu sürüm, JSON içinden otomatik yakaladığım “İşe Başlangıç / Gün / Yaş” ana bölümünden ön sonuç üretir. Kısmi/malulen/engellilik gibi diğer başlıkları sonraki adımda ekleyeceğiz.");
+  lines.push("⚠️ Not: Bu rapor, yüklediğin tablodan otomatik okuma ile üretilen bir hesaplamadır. Statü geçişleri, hizmet birleştirme, borçlanma, fiili hizmet zammı vb. durumlarda sonuç değişebilir.");
 
   return lines.join("\n");
 }
@@ -238,35 +385,38 @@ bot.on("text", (ctx) => {
       if (s.step === 5) return ctx.reply("Tekrar yazalım: Toplam prim gününüz? (örn 5400)");
     }
 
-    // evet ise kaydet ve ilerle
+    // evet: kaydet ve ilerle
     s.data[s.pending.key] = s.pending.value;
     s.awaitingConfirm = false;
     s.step = s.pending.nextStep;
     s.pending = null;
 
-    // sonraki soru
     if (s.step === 2) return ctx.reply("Cinsiyetiniz? (Kadın / Erkek)");
     if (s.step === 3) return ctx.reply("Doğum yılınız? (örn 1988)");
     if (s.step === 4) return ctx.reply("İlk sigorta giriş yılınız? (örn 2008)");
     if (s.step === 5) return ctx.reply("Toplam prim gününüz? (örn 5400)");
 
-    // hesaplama
+    // hesap
     if (s.step === 6) {
       const statusRules = rules[s.data.status] || [];
-      const extracted = extractMainRetirementTable(statusRules);
 
-      if (!extracted.length) {
+      const mainExtracted = extractMainRetirementTable(statusRules);
+      if (!mainExtracted.length) {
         s.step = 0;
         return ctx.reply("Bu statü için ana emeklilik tablosunu otomatik bulamadım. (Bir sonraki adımda tabloyu hedeflemeyi ekleriz.)");
       }
-
-      const picked = pickRuleByEntryYear(extracted, s.data.gender, s.data.entryYear);
-      if (!picked) {
+      const mainPicked = pickRuleByEntryYear(mainExtracted, s.data.gender, s.data.entryYear);
+      if (!mainPicked) {
         s.step = 0;
-        return ctx.reply("Giriş yılına göre uygun kuralı bulamadım. (Tablo tarih formatı farklı olabilir; bir sonraki adımda düzeltiriz.)");
+        return ctx.reply("Giriş yılına göre ana kuralı bulamadım. (Tablo tarih formatı farklı olabilir; düzeltiriz.)");
       }
 
-      const report = buildReport(
+      const partialExtracted = extractPartialRetirementTable(statusRules);
+      const insuranceYearsApprox = Math.max(0, 2026 - s.data.entryYear);
+      const partialPicked =
+        partialExtracted.length ? pickPartialRule(partialExtracted, s.data.gender, insuranceYearsApprox) : null;
+
+      const report = buildFullReport(
         {
           status: s.data.status,
           gender: s.data.gender,
@@ -274,7 +424,8 @@ bot.on("text", (ctx) => {
           entryYear: s.data.entryYear,
           prim: s.data.prim,
         },
-        picked
+        mainPicked,
+        partialPicked
       );
 
       s.step = 0;
@@ -317,11 +468,10 @@ bot.on("text", (ctx) => {
   }
 });
 
-// Telegram botu başlat
+// Bot + Render port
 bot.launch();
 console.log("Bot çalışıyor...");
 
-// Render port binding için mini HTTP server
 const PORT = process.env.PORT || 3000;
 http
   .createServer((req, res) => {
