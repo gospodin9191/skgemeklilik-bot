@@ -11,12 +11,8 @@ function getSession(id) {
   return sessions.get(id);
 }
 
-/* -----------------------------
-   Tarih yardımcıları
------------------------------- */
-function pad2(n) {
-  return String(n).padStart(2, "0");
-}
+/* --------- Helpers: dates --------- */
+function pad2(n) { return String(n).padStart(2, "0"); }
 
 function normalizeDateTR(s) {
   const t = (s || "").trim();
@@ -35,9 +31,7 @@ function dateToNumberTR(d) {
 function parseEntryRange(text) {
   const raw = (text || "").toString().trim();
 
-  const mRange = raw.match(
-    /(\d{1,2}[./-]\d{1,2}[./-]\d{4})\s*-\s*(\d{1,2}[./-]\d{1,2}[./-]\d{4})/
-  );
+  const mRange = raw.match(/(\d{1,2}[./-]\d{1,2}[./-]\d{4})\s*-\s*(\d{1,2}[./-]\d{1,2}[./-]\d{4})/);
   if (mRange) {
     const start = normalizeDateTR(mRange[1]);
     const end = normalizeDateTR(mRange[2]);
@@ -56,46 +50,29 @@ function parseEntryRange(text) {
     if (start) return { type: "after", start, raw };
   }
 
-  // yıl bazlı fallback: 2000-2008 / 2008 sonrası / 1999 öncesi
+  // year fallback
   const yRange = raw.match(/(19\d{2}|20\d{2})\s*-\s*(19\d{2}|20\d{2})/);
-  if (yRange) {
-    return { type: "range", start: `01.01.${yRange[1]}`, end: `31.12.${yRange[2]}`, raw };
-  }
+  if (yRange) return { type: "range", start: `01.01.${yRange[1]}`, end: `31.12.${yRange[2]}`, raw };
+
   const yBefore = raw.match(/(19\d{2}|20\d{2}).*(öncesi|ve\s*öncesi)/i);
-  if (yBefore) {
-    return { type: "before", end: `31.12.${yBefore[1]}`, raw };
-  }
+  if (yBefore) return { type: "before", end: `31.12.${yBefore[1]}`, raw };
+
   const yAfter = raw.match(/(19\d{2}|20\d{2}).*(sonrası|ve\s*sonrası)/i);
-  if (yAfter) {
-    return { type: "after", start: `01.01.${yAfter[1]}`, raw };
-  }
+  if (yAfter) return { type: "after", start: `01.01.${yAfter[1]}`, raw };
 
   return null;
 }
 
-/* -----------------------------
-   JSON satırlarını diziye çevirme
------------------------------- */
+/* --------- Helpers: row reading --------- */
 function rowToArray(rowObj) {
-  // 1) Eğer "0","1","2" gibi sayısal kolonlar varsa onları sırayla al
-  const numKeys = Object.keys(rowObj)
-    .filter((k) => /^\d+$/.test(k))
-    .sort((a, b) => Number(a) - Number(b));
-
-  if (numKeys.length) {
-    return numKeys.map((k) => (rowObj[k] ?? "").toString().trim());
-  }
-
-  // 2) Yoksa: başlıklı kolonlar var demektir -> tüm değerleri sırayla al
-  // (csv-parser başlık kullanmış olabilir)
-  return Object.values(rowObj).map((v) => (v ?? "").toString().trim());
+  const numKeys = Object.keys(rowObj).filter(k => /^\d+$/.test(k)).sort((a,b)=>Number(a)-Number(b));
+  if (numKeys.length) return numKeys.map(k => (rowObj[k] ?? "").toString().trim());
+  return Object.values(rowObj).map(v => (v ?? "").toString().trim());
 }
-/* -----------------------------
-   Ana kural çıkarma (başlıksız)
------------------------------- */
+
+/* --------- Rule extraction --------- */
 function extractMainRules(statusRules) {
   const rows = statusRules.map(rowToArray);
-
   let currentGender = null;
   const extracted = [];
 
@@ -107,22 +84,19 @@ function extractMainRules(statusRules) {
     let range = null;
     for (const cell of rr) {
       const r = parseEntryRange(cell);
-      if (r) {
-        range = r;
-        break;
-      }
+      if (r) { range = r; break; }
     }
     if (!range) continue;
 
     const nums = rr
-      .map((c) => (c || "").toString().replace(/\./g, ""))
-      .map((t) => t.match(/\d+/g) || [])
+      .map(c => (c || "").toString().replace(/\./g, ""))
+      .map(t => t.match(/\d+/g) || [])
       .flat()
-      .map((n) => Number(n))
-      .filter((n) => Number.isFinite(n));
+      .map(Number)
+      .filter(n => Number.isFinite(n));
 
-    const dayCandidates = nums.filter((n) => n >= 3000 && n <= 20000);
-    const ageCandidates = nums.filter((n) => n >= 38 && n <= 80);
+    const dayCandidates = nums.filter(n => n >= 3000 && n <= 20000);
+    const ageCandidates = nums.filter(n => n >= 38 && n <= 80);
 
     const requiredDays = dayCandidates.length ? Math.max(...dayCandidates) : null;
     const requiredAge = ageCandidates.length ? Math.min(...ageCandidates) : null;
@@ -140,9 +114,9 @@ function pickRuleByEntryDate(rulesExtracted, gender, entryDateStr) {
   if (!entryNum) return null;
 
   const ordered = [
-    ...rulesExtracted.filter((r) => r.genderTag === gender),
-    ...rulesExtracted.filter((r) => !r.genderTag),
-    ...rulesExtracted.filter((r) => r.genderTag && r.genderTag !== gender),
+    ...rulesExtracted.filter(r => r.genderTag === gender),
+    ...rulesExtracted.filter(r => !r.genderTag),
+    ...rulesExtracted.filter(r => r.genderTag && r.genderTag !== gender),
   ];
 
   for (const r of ordered) {
@@ -157,16 +131,13 @@ function pickRuleByEntryDate(rulesExtracted, gender, entryDateStr) {
     }
     if (r.range.type === "after") {
       const s = dateToNumberTR(r.range.start);
-      if (s && entryNum && entryNum >= s) return r;
+      if (s && entryNum >= s) return r;
     }
   }
   return null;
 }
 
-/* -----------------------------
-   Debug: yakalanan tarih ifadeleri
------------------------------- */
-function debugRanges(statusRules, limit = 15) {
+function debugRanges(statusRules, limit = 20) {
   const rows = statusRules.map(rowToArray);
   const found = [];
   for (const rr of rows) {
@@ -181,9 +152,7 @@ function debugRanges(statusRules, limit = 15) {
   return found;
 }
 
-/* -----------------------------
-   Rapor
------------------------------- */
+/* --------- Report --------- */
 function yearFromDate(dateStr) {
   const nd = normalizeDateTR(dateStr);
   if (!nd) return null;
@@ -206,7 +175,7 @@ function buildReport(user, mainRule) {
 
   if (!mainRule) {
     lines.push("❗ Ana emeklilik kuralını tablodan otomatik seçemedim.");
-    lines.push("🧪 /debug yaz → bot tablodan yakaladığı tarih örneklerini gösterecek. Oradan 1 hamlede çözeriz.");
+    lines.push("🧪 /debug yaz → bot tablodan yakaladığı tarih örneklerini gösterecek.");
     return lines.join("\n");
   }
 
@@ -218,7 +187,7 @@ function buildReport(user, mainRule) {
   lines.push(`• Gerekli yaş: ${mainRule.requiredAge}`);
 
   if (missAge === null) {
-    lines.push("⏳ Sonuç: Yaş hesaplanamadı (doğum tarihi formatını kontrol et).");
+    lines.push("⏳ Sonuç: Yaş hesaplanamadı.");
   } else if (missPrim === 0 && missAge === 0) {
     lines.push("✅ Sonuç: *Yaş + prim şartı tamam görünüyor.*");
   } else {
@@ -231,27 +200,7 @@ function buildReport(user, mainRule) {
 }
 
 /* -----------------------------
-   /debug komutu HER ADIMDA çalışsın
------------------------------- */
-bot.command("debug", (ctx) => {
-  const s = getSession(ctx.from.id);
-  const status = (s.data.status || "4A").toUpperCase();
-  const statusRules = rules[status] || [];
-  const found = debugRanges(statusRules, 15);
-
-  if (!found.length) {
-    return ctx.reply(
-      `DEBUG (${status}): Hiç tarih ifadesi yakalayamadım.\n` +
-      `Muhtemelen tabloda tarih biçimi farklı (ör: "8 Eylül 1999" gibi).\n` +
-      `Bana tabloda geçen bir örnek satırı buraya kopyalarsan hemen uyarlarım.`
-    );
-  }
-
-  return ctx.reply(`DEBUG (${status}): İlk ${found.length} örnek:\n- ` + found.join("\n- "));
-});
-
-/* -----------------------------
-   Bot akışı (onaysız)
+   START
 ------------------------------ */
 bot.start((ctx) => {
   const s = getSession(ctx.from.id);
@@ -260,12 +209,28 @@ bot.start((ctx) => {
   ctx.reply("SGK statünüz nedir? (4A / 4B / 4C)");
 });
 
+/* -----------------------------
+   TEK GİRİŞ NOKTASI: text
+   /debug burada EN BAŞTA yakalanır (hangi step olursa olsun)
+------------------------------ */
 bot.on("text", (ctx) => {
   const s = getSession(ctx.from.id);
   const msg = ctx.message.text.trim();
 
-  // komutlar buraya düşmesin
-  if (msg.startsWith("/")) return;
+  // ✅ DEBUG her zaman çalışır
+  if (msg.toLowerCase() === "/debug" || msg.toLowerCase() === "debug") {
+    const status = (s.data.status || "4A").toUpperCase();
+    const statusRules = rules[status] || [];
+    const found = debugRanges(statusRules, 20);
+    if (!found.length) {
+      return ctx.reply(
+        `DEBUG (${status}): Hiç tarih ifadesi yakalayamadım.\n` +
+        `Bu, verinin "satır hücresi" şeklinde gelmediği anlamına gelebilir.\n` +
+        `Bir sonraki adımda JSON'dan örnek satırı Telegram'a bastırıp yapıyı göstereceğim.`
+      );
+    }
+    return ctx.reply(`DEBUG (${status}): İlk ${found.length} örnek:\n- ` + found.join("\n- "));
+  }
 
   if (s.step === 0) return ctx.reply("Başlamak için /start yaz 🙂");
 
@@ -278,7 +243,7 @@ bot.on("text", (ctx) => {
   }
 
   if (s.step === 2) {
-    const t = msg.trim().toLowerCase();
+    const t = msg.toLowerCase();
     let v = null;
     if (t.startsWith("e")) v = "Erkek";
     if (t.startsWith("k")) v = "Kadın";
@@ -323,7 +288,9 @@ bot.on("text", (ctx) => {
   }
 });
 
-// Bot + Render port
+/* -----------------------------
+   Render port
+------------------------------ */
 bot.launch();
 console.log("Bot çalışıyor...");
 
